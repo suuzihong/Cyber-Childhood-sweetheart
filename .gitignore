@@ -1,0 +1,7 @@
+﻿# 运行时数据（勿提交）
+data/
+config.json
+*.log
+__pycache__/
+*.bak*
+.venv/

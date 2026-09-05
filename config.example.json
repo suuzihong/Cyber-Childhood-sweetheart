@@ -1,0 +1,74 @@
+{
+  "_说明": "复制本文件为 config.json 后填写。所有带 <...> 的都是你要填的。api_key 可直接填，或用 api_key_env 指定环境变量名（推荐，避免明文入库）。",
+  "agent": {
+    "name": "你的角色名",
+    "timezone": "Asia/Shanghai",
+    "persona_path": "data/persona.md"
+  },
+  "schedule": {
+    "dream_time": "00:30",
+    "wake_time": "08:30",
+    "activity_morning": "09:00",
+    "fragment_lunch": "12:30",
+    "activity_afternoon": "14:00",
+    "chat_touchpoints": ["21:30"],
+    "casual_poke": {
+      "enabled": true,
+      "window": ["10:00", "21:00"],
+      "min_gap_minutes": 180,
+      "check_interval_minutes": 10
+    },
+    "memory_closure": "23:30",
+    "max_daily_world_views": 5,
+    "max_world_views_per_round": 1,
+    "fragment_ttl_days": 3,
+    "history_max": 20
+  },
+  "llm": {
+    "main": {
+      "base_url": "<你的 OpenAI 兼容 API 地址，如 https://api.openai.com/v1>",
+      "api_key": "<你的 key，或用 api_key_env 替代>",
+      "model": "<主模型，如 deepseek-chat / gpt-4o-mini>"
+    },
+    "cheap": {
+      "base_url": "<同上或同服务商>",
+      "api_key": "<同上>",
+      "model": "<便宜模型，用于碎片提炼等轻任务>"
+    },
+    "vision": {
+      "base_url": "<视觉模型地址，可选>",
+      "api_key": "<同上>",
+      "model": "<视觉模型，如 gpt-4o / glm-4v，可选>"
+    }
+  },
+  "channel": {
+    "type": "onebot11",
+    "ws_url": "ws://127.0.0.1:3001",
+    "targets": {
+      "private": ["<你的QQ号>"]
+    },
+    "max_active_per_day": 8
+  },
+  "adapters": {
+    "comfyui": {
+      "base_url": "http://127.0.0.1:8188",
+      "workflow_draw": "<可选：画图工作流 json 路径>",
+      "workflow_selftie": "<可选：自拍工作流 json 路径>",
+      "lora": null,
+      "daily_draw_limit": 3,
+      "daily_selftie_limit": 2
+    },
+    "bilibili": {
+      "enabled": false,
+      "daily_deep_limit": 2
+    },
+    "tieba": {
+      "enabled": false,
+      "daily_round_limit": 1
+    },
+    "zhihu": {
+      "enabled": false,
+      "daily_round_limit": 1
+    }
+  }
+}
