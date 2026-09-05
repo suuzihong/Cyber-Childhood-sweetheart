@@ -1,0 +1,28 @@
+name: Syntax Check
+
+on:
+  push:
+    paths:
+      - '**.py'
+      - '.github/workflows/syntax-check.yml'
+  pull_request:
+
+jobs:
+  py-compile:
+    name: Python syntax check (compileall)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile all Python files
+        run: |
+          python -m compileall -q \
+            main.py import_memory.py \
+            core layers adapters channel
+          echo "All Python files passed syntax check."
