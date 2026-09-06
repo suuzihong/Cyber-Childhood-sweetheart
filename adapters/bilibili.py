@@ -49,20 +49,21 @@ class BilibiliAdapter:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace"))
 
-    def _pick_video(self, topic: str) -> dict | None:
-        """挑一个视频：有主题用搜索，否则用热门榜。"""
+    def _pick_video(self, topic: str, exclude_bvid: str = "") -> dict | None:
+        """挑一个视频：有主题用搜索，否则用热门榜（跳过上次分享过的视频）。"""
         try:
             if topic:
                 q = urllib.parse.quote(topic)
                 r = self._get(f"{API}/x/web-interface/search/type?search_type=video&keyword={q}")
                 res = r.get("data", {}).get("result") or []
-                if res:
-                    return {"bvid": res[0]["bvid"], "title": res[0]["title"], "description": res[0].get("description", "")}
+                for it in res:
+                    if it["bvid"] != exclude_bvid:
+                        return {"bvid": it["bvid"], "title": it["title"], "description": it.get("description", "")}
             r = self._get(f"{API}/x/web-interface/ranking/v2?rid=0&type=all")
             lst = r.get("data", {}).get("list") or []
-            if lst:
-                it = lst[0]
-                return {"bvid": it["bvid"], "title": it["title"], "description": it.get("desc", "")}
+            for it in lst:
+                if it["bvid"] != exclude_bvid:
+                    return {"bvid": it["bvid"], "title": it["title"], "description": it.get("desc", "")}
         except Exception as e:
             log.warning("bili 挑视频失败: %s", e)
         return None
@@ -186,7 +187,7 @@ class BilibiliAdapter:
     # ---------- 入口 ----------
     def execute(self, ctx: dict[str, Any]) -> AdapterResult:
         topic = (ctx.get("topic") or "").strip()
-        pick = self._pick_video(topic)
+        pick = self._pick_video(topic, ctx.get("exclude_bvid") or "")
         if not pick:
             return AdapterResult(
                 capability=self.name(), output=None, summary="（B站这会儿没刷到想看的）", shareable=False

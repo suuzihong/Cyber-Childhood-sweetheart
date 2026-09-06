@@ -266,7 +266,8 @@ class LinchengyuxiApp:
     def _send_reply(self, uid: str, msgs: list[str], text: str, lo: dict) -> None:
         """发送回复；若用户在回应她刚主动发的图/链接（“看看/发我/图呢”），把媒体/链接一并带上。"""
         want = self._wants_outgoing_media(msgs[-1], lo)
-        media = [m for m in (lo.get("media") or []) if m]
+        # 只补发她自己的图（comfyui/selftie）：视频帧不算“她的图”，要图时走现画兜底
+        media = [m for m in (lo.get("media") or []) if m] if self.state.get("last_media_origin") == "own" else []
         link = lo.get("link") or ""
         if want and media:
             self.channel.send_private_image(uid, media[0], text)
@@ -530,7 +531,12 @@ class LinchengyuxiApp:
             return
         adapter = self.registry.get(cap_name)
         try:
-            result = adapter.execute({"slot": slot})
+            # 排除上次分享过的 B 站视频（防重复刷同一个）
+            exclude_bvid = ""
+            _lk = self.state.get("last_link") or ""
+            if "bilibili.com/video/" in _lk:
+                exclude_bvid = _lk.rstrip("/").split("/")[-1]
+            result = adapter.execute({"slot": slot, "exclude_bvid": exclude_bvid})
         except Exception as e:  # noqa: BLE001
             log.error("[活动 %s] %s 执行失败: %s", slot, cap_name, e)
             return
@@ -598,7 +604,7 @@ class LinchengyuxiApp:
         if not summary:
             summary = (getattr(result, "summary", "") or "").strip() or "刚干完件小事，跟你吱一声"
         try:
-            topic = self.dialogue.build_topic([summary], 0, has_media=bool(getattr(result, "media", None) or []))
+            topic = self.dialogue.build_topic([summary], 0, has_media=self._has_today_media())
         except Exception as e:  # noqa: BLE001
             log.warning("[主动] 生成失败，用原文: %s", e)
             topic = summary
