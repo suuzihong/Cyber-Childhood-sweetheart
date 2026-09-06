@@ -416,7 +416,7 @@ class LinchengyuxiApp:
                 return state
             except json.JSONDecodeError:
                 pass
-        return {"active_today": 0, "last_date": "", "day_events": [], "last_chat_ts": ""}
+        return {"active_today": 0, "last_date": "", "day_events": [], "last_chat_ts": "", "task_by_cap": {}, "spoken_today": []}
 
     def _save_state(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -438,6 +438,8 @@ class LinchengyuxiApp:
             self.state["last_outgoing"] = {}  # 昨天的“刚说过”作废
             # 昨天的任务清单作废（今天 8:30 行动层会重建；避免 wake 没跑时 activity 用旧任务）
             self.state["tasks"] = []
+            self.state["task_by_cap"] = {}  # 昨天的任务映射作废
+            self.state["spoken_today"] = []  # 昨天说过的作废
 
     # ---------- 槽位任务 ----------
     def job_dream(self) -> None:
@@ -462,6 +464,7 @@ class LinchengyuxiApp:
             log.info("[起床] 最近做梦日期 %s < %s，保留即时记忆（待沉淀）", self.memory.last_dream_date() or "(无)", yesterday)
         plan = self.action.make_daily_plan(self.rng)
         self.state["day_events"] = [t.description for t in plan.tasks if t.capability]
+        self.state["task_by_cap"] = {t.capability: t.description for t in plan.tasks if t.capability}
         self.state["tasks"] = [t.to_dict() for t in plan.tasks]
         self._save_state()
         log.info("[起床] 今日任务: %s", [t.description for t in plan.tasks])
@@ -505,7 +508,7 @@ class LinchengyuxiApp:
             topic = self.dialogue.build_topic(
                 self.state.get("day_events", []), 100,
                 has_media=self._has_today_media() and not self._media_already_sent(),
-                already_said=(self.state.get("last_outgoing") or {}).get("text", ""),
+                already_said="\n".join(self.state.get("spoken_today", [])),
             ) or "欸，闲得慌，跟你说个事"
         except Exception:
             topic = "欸，闲得慌，跟你说个事"
@@ -523,6 +526,7 @@ class LinchengyuxiApp:
                 if media:
                     self._mark_media_sent()
                 log.info("[闲补] %s", topic)
+                self.state.setdefault("spoken_today", []).append(topic)
                 # 记录最近一次主动说的话（只记 own 图，避免补图发成视频帧）
                 self.state["last_outgoing"] = {
                     "text": topic,
@@ -573,6 +577,11 @@ class LinchengyuxiApp:
         shareable = bool(result.shareable and summary)
         if shareable:
             self.state["day_events"].append(summary)
+        # 对应计划任务已完成：从话题素材里移除，防止整天反复提同一件事
+        done_desc = self.state.get("task_by_cap", {}).pop(cap_name, None)
+        if done_desc and done_desc in self.state["day_events"]:
+            self.state["day_events"].remove(done_desc)
+            log.info("[活动 %s] 任务已完成，移出话题素材: %s", cap_name, done_desc[:30])
         # 暂存最近一次产出的图/链接（供后续她要图时补发）
         # origin: own=她画的/拍的图, video=转发视频的帧(不算她的图), 其他=""
         self.state["last_media"] = list(getattr(result, "media", None) or [])
@@ -624,7 +633,11 @@ class LinchengyuxiApp:
         if not summary:
             summary = (getattr(result, "summary", "") or "").strip() or "刚干完件小事，跟你吱一声"
         try:
-            topic = self.dialogue.build_topic([summary], 0, has_media=self._has_today_media())
+            topic = self.dialogue.build_topic(
+                [summary], 0,
+                has_media=self._has_today_media(),
+                already_said="\n".join(self.state.get("spoken_today", [])),
+            )
         except Exception as e:  # noqa: BLE001
             log.warning("[主动] 生成失败，用原文: %s", e)
             topic = summary
@@ -642,6 +655,7 @@ class LinchengyuxiApp:
             if result.media:
                 self._mark_media_sent()
             log.info("[主动] 刚%s→开口: %s%s", cap_name, topic, f" 链接:{link}" if link else "")
+            self.state.setdefault("spoken_today", []).append(topic)
             # 记录最近一次主动说的话（含媒体/链接），供被动回复注入上下文并补发图/链接
             self.state["last_outgoing"] = {
                 "text": topic,
@@ -685,7 +699,7 @@ class LinchengyuxiApp:
         topic = self.dialogue.build_topic(
             self.state.get("day_events", []), touchpoint,
             has_media=self._has_today_media() and not self._media_already_sent(),
-            already_said=(self.state.get("last_outgoing") or {}).get("text", ""),
+            already_said="\n".join(self.state.get("spoken_today", [])),
         )
         # 兜底：LLM 失败回退 day_events[0] 仍可能为空串（极端），绝不让空消息发出去
         if not topic or not topic.strip():
@@ -704,6 +718,7 @@ class LinchengyuxiApp:
                 if media:
                     self._mark_media_sent()
                 log.info("[对话 %d] %s", touchpoint, topic)
+                self.state.setdefault("spoken_today", []).append(topic)
                 # 记录最近一次主动说的话 + 写即时记忆（她自己说过的话要记得）
                 self.state["last_outgoing"] = {
                     "text": topic,
