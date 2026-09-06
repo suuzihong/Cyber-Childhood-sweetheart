@@ -166,16 +166,22 @@ class BilibiliAdapter:
             for fp in frames:
                 b64 = base64.b64encode(open(fp, "rb").read()).decode()
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-            text = vision.chat(
-                [{"role": "user", "content": content}],
-                max_tokens=400,
-                allow_reasoning_fallback=False,  # 绝不用思考过程当观感
-            ).strip().strip('"\'“”‘’')
-            # 过滤思考过程泄漏：超长英文元思考 → 回退文字版
+            # 过滤思考过程泄漏：超长英文元思考 → 回退文字版（偶发抽风重试一次）
             noise = ("roleplay", "reasoning", "analysis", "task repetition", "I need to output", "Let me make it", "user wants me")
-            if not text or len(text) > 120 or any(n in text.lower() for n in noise):
-                return self._fallback_summary(meta)
-            return text
+            for _attempt in range(2):
+                try:
+                    text = (vision.chat(
+                        [{"role": "user", "content": content}],
+                        max_tokens=400,
+                        allow_reasoning_fallback=False,  # 绝不用思考过程当观感
+                    ) or "").strip().strip('"\'“”‘’')
+                except Exception as e:  # noqa: BLE001
+                    log.warning("bili 视觉调用异常(第%d次): %s", _attempt + 1, e)
+                    text = ""
+                if text and len(text) <= 120 and not any(n in text.lower() for n in noise):
+                    return text
+                log.warning("bili 视觉总结被过滤(第%d次)，重试", _attempt + 1)
+            return self._fallback_summary(meta)
         except Exception as e:
             log.warning("bili 视觉总结失败，回退文字版: %s", e)
             return self._fallback_summary(meta)
@@ -183,6 +189,36 @@ class BilibiliAdapter:
     @staticmethod
     def _fallback_summary(meta: dict) -> str:
         return f"今天刷到B站一个视频《{meta['title']}》（{meta.get('owner','')}发的），看着挺有意思"
+
+    # ---------- 深度解析（用户发链接时看画面） ----------
+    def analyze_video(self, bvid: str) -> str | None:
+        """对指定 bvid 做深度解析：下载 + 抽帧 + 视觉看画面。
+
+        返回注入回复上下文的文本（标题 + UP主/分区 + 简介 + 画面观感），
+        失败（没下载到/没抽到帧/视觉挂了）返回 None，调用方回退 linkparser 元数据。
+        """
+        meta = self._get_video_meta(bvid)
+        if not meta:
+            return None
+        stream_url = self._get_stream(meta)
+        frames: list[str] = []
+        if stream_url:
+            local = self._download_stream(stream_url, meta["bvid"])
+            if local:
+                frames = self._extract_frames(local, meta["bvid"])
+        if not frames:
+            log.info("[bilibili] 深度解析无帧，回退元数据: %s", bvid)
+            return None
+        t0 = time.time()
+        feel = self._summarize(meta, frames)
+        log.info("[bilibili] 深度解析《%s》 耗%.1fs 帧%d", meta["title"], time.time() - t0, len(frames))
+        desc = (meta.get("description") or "(无)").strip()[:300]
+        return (
+            f"标题：《{meta['title']}》\n"
+            f"UP主：{meta.get('owner', '')} · 分区：{meta.get('tname', '')}\n"
+            f"简介：{desc}\n"
+            f"画面观感：{feel}"
+        )
 
     # ---------- 入口 ----------
     def execute(self, ctx: dict[str, Any]) -> AdapterResult:

@@ -249,6 +249,15 @@ class LinchengyuxiApp:
                 url = find_link(msg)
                 if not url:
                     continue
+                # B站视频链接：先深度解析（下载+抽帧+视觉看画面，慢 20-30s），失败回退元数据
+                bvid = ""
+                if "bilibili.com/video/" in url:
+                    bvid = url.rstrip("/").split("/")[-1]
+                if bvid:
+                    deep = self._deep_analyze_bili(bvid)
+                    if deep:
+                        return deep
+                    log.info("[链接] B站深度解析失败，回退元数据: %s", url)
                 info = parse_link(url)
                 if not info.get("ok"):
                     log.info("[链接] 打不开: %s", url)
@@ -262,6 +271,17 @@ class LinchengyuxiApp:
         except Exception as e:  # noqa: BLE001
             log.warning("链接解析异常，忽略: %s", e)
         return None
+
+    def _deep_analyze_bili(self, bvid: str) -> str | None:
+        """B站视频深度解析：复用 bilibili 适配器（下载+抽帧+视觉），失败返回 None。"""
+        try:
+            adapter = self.registry.get("bilibili_browse")
+            if adapter is None or not hasattr(adapter, "analyze_video"):
+                return None
+            return adapter.analyze_video(bvid)
+        except Exception as e:  # noqa: BLE001
+            log.warning("B站深度解析异常: %s", e)
+            return None
 
     def _send_reply(self, uid: str, msgs: list[str], text: str, lo: dict) -> None:
         """发送回复；若用户在回应她刚主动发的图/链接（“看看/发我/图呢”），把媒体/链接一并带上。"""
