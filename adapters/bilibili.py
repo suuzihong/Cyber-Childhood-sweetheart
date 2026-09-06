@@ -165,8 +165,16 @@ class BilibiliAdapter:
             for fp in frames:
                 b64 = base64.b64encode(open(fp, "rb").read()).decode()
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-            text = vision.chat([{"role": "user", "content": content}], max_tokens=400).strip().strip('"\'“”‘’')
-            return text or self._fallback_summary(meta)
+            text = vision.chat(
+                [{"role": "user", "content": content}],
+                max_tokens=400,
+                allow_reasoning_fallback=False,  # 绝不用思考过程当观感
+            ).strip().strip('"\'“”‘’')
+            # 过滤思考过程泄漏：超长英文元思考 → 回退文字版
+            noise = ("roleplay", "reasoning", "analysis", "task repetition", "I need to output", "Let me make it", "user wants me")
+            if not text or len(text) > 120 or any(n in text.lower() for n in noise):
+                return self._fallback_summary(meta)
+            return text
         except Exception as e:
             log.warning("bili 视觉总结失败，回退文字版: %s", e)
             return self._fallback_summary(meta)

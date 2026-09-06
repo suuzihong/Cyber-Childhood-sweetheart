@@ -156,6 +156,7 @@ class LinchengyuxiApp:
             from datetime import datetime as _dt
 
             self.state["last_chat_ts"] = _dt.now().isoformat()
+            self._save_state()  # 落盘：重启后闲补 3 小时计时不丢
             self._pending_event.set()
             log.info("[收到] %s: %s", uid, msg[:40])
         except Exception as e:  # noqa: BLE001
@@ -163,15 +164,28 @@ class LinchengyuxiApp:
 
     @staticmethod
     def _extract_message_text(data: dict) -> str:
-        """从 OneBot 私聊事件里取纯文本（拼接 CQ 消息段）。"""
+        """从 OneBot 私聊事件里取文本（拼接 CQ 消息段）。
+
+        引用回复（reply/quote 段）会把被引用原话带进上下文，
+        让她明白用户是在针对她之前说的哪句话提问（新版 OneBot11
+        的 reply 段带 text；旧版只有 id 时忽略，不破坏现有功能）。
+        """
         msg = data.get("message")
         if isinstance(msg, str):
             return msg
         if isinstance(msg, list):
             parts = []
             for seg in msg:
-                if isinstance(seg, dict) and seg.get("type") == "text":
-                    parts.append(seg.get("data", {}).get("text", ""))
+                if not isinstance(seg, dict):
+                    continue
+                stype = seg.get("type", "")
+                sdata = seg.get("data", {}) or {}
+                if stype == "text":
+                    parts.append(sdata.get("text", ""))
+                elif stype in ("reply", "quote"):
+                    quoted = (sdata.get("text") or "").strip()
+                    if quoted:
+                        parts.append(f"（你引用了我发的消息：\"{quoted}\"）")
             return "".join(parts)
         return ""
 
@@ -258,7 +272,7 @@ class LinchengyuxiApp:
             self.channel.send_private_image(uid, media[0], text)
             log.info("[回复] 带图发送: %s", media[0])
             self.state["last_outgoing"]["media"] = []  # 图已给，避免下次重复发
-            self._save_state()
+            self._mark_media_sent()
             return
         if want and link:
             self.channel.send_private(uid, f"{text}\n{link}")
@@ -314,7 +328,13 @@ class LinchengyuxiApp:
         return any(w in user_msg for w in intent_words)
 
     def _has_today_media(self) -> bool:
-        """今天是否真的产出过可分享的图/照片（media 文件存在且 24h 内生成）。"""
+        """今天是否真的产出过可分享的图/照片。
+
+        只认 comfyui_draw/selftie 自己产出的图（origin=own）；
+        bilibili 的视频帧不算"她的图"，否则她会误以为今天画过图。
+        """
+        if self.state.get("last_media_origin") != "own":
+            return False
         import time as _time
         from pathlib import Path
 
@@ -328,6 +348,28 @@ class LinchengyuxiApp:
             return p.stat().st_mtime >= _time.time() - 24 * 3600
         except Exception:
             return bool(media)
+
+    def _media_already_sent(self) -> bool:
+        """上次产出的图是否已在之前的主动消息里附图发过（避免重复发同一张图）。"""
+        sent_ts = self.state.get("last_media_sent_ts")
+        if not sent_ts:
+            return False
+        media = [m for m in (self.state.get("last_media") or []) if m]
+        if not media:
+            return False
+        try:
+            from datetime import datetime as _dt
+            sent = _dt.fromisoformat(sent_ts).timestamp() if isinstance(sent_ts, str) else float(sent_ts)
+            from pathlib import Path
+            return Path(media[0]).stat().st_mtime <= sent
+        except Exception:
+            return False
+
+    def _mark_media_sent(self) -> None:
+        """记录当前 last_media 已附图发送过，防止后续闲补/触点重复发同一张图。"""
+        from datetime import datetime as _dt
+        self.state["last_media_sent_ts"] = _dt.now().isoformat()
+        self._save_state()
 
     def _simulate_typing(self, text: str) -> None:
         """模拟打字耗时：按回复长度估秒数，加随机抖动，范围 2~6 秒。"""
@@ -439,7 +481,11 @@ class LinchengyuxiApp:
             except Exception:
                 pass
         try:
-            topic = self.dialogue.build_topic(self.state.get("day_events", []), 100, has_media=self._has_today_media()) or "欸，闲得慌，跟你说个事"
+            topic = self.dialogue.build_topic(
+                self.state.get("day_events", []), 100,
+                has_media=self._has_today_media() and not self._media_already_sent(),
+                already_said=(self.state.get("last_outgoing") or {}).get("text", ""),
+            ) or "欸，闲得慌，跟你说个事"
         except Exception:
             topic = "欸，闲得慌，跟你说个事"
         self.state["active_today"] += 1
@@ -448,13 +494,19 @@ class LinchengyuxiApp:
         self._save_state()
         if self.channel:
             try:
-                self.channel.broadcast_private(topic)
+                # 闲补只带她自己画的图（own），视频帧不随闲聊补发；已附图发过的图不重复发
+                has_media = self._has_today_media() and not self._media_already_sent()
+                media = list(self.state.get("last_media") or []) if has_media else []
+                link = self.state.get("last_link") or "" if has_media else ""
+                self.channel.broadcast_private(topic, media or None)
+                if media:
+                    self._mark_media_sent()
                 log.info("[闲补] %s", topic)
-                # 记录最近一次主动说的话（闲补无新图，沿用上次活动暂存的媒体/链接）
+                # 记录最近一次主动说的话（只记 own 图，避免补图发成视频帧）
                 self.state["last_outgoing"] = {
                     "text": topic,
-                    "media": list(self.state.get("last_media") or []),
-                    "link": self.state.get("last_link") or "",
+                    "media": media,
+                    "link": link,
                     "ts": dt.now().isoformat(),
                 }
                 # 她主动说的话也写进即时记忆（做梦层一并沉淀）
@@ -490,12 +542,20 @@ class LinchengyuxiApp:
         summary = (getattr(result, "summary", "") or "").strip()
         if not summary:
             summary = "刚忙完一件小事，感觉还行"
+        # 清洗适配器描述：LLM 思考过程泄漏（超长英文元思考）→ 简短兜底，避免垃圾进 day_events/碎片/主动开口
+        summary = self._clean_event_text(summary, cap_name)
         shareable = bool(result.shareable and summary)
         if shareable:
             self.state["day_events"].append(summary)
         # 暂存最近一次产出的图/链接（供后续她要图时补发）
+        # origin: own=她画的/拍的图, video=转发视频的帧(不算她的图), 其他=""
         self.state["last_media"] = list(getattr(result, "media", None) or [])
         self.state["last_link"] = getattr(result, "link", "") or ""
+        self.state["last_media_origin"] = (
+            "own" if cap_name in ("comfyui_draw", "selftie")
+            else "video" if cap_name == "bilibili_browse"
+            else ""
+        )
         # 行动层碎片：刷B站/贴吧/知乎/画图的“感受”写进碎片仓（供做梦层沉淀世界性格）
         if shareable:
             try:
@@ -513,9 +573,18 @@ class LinchengyuxiApp:
         elif result.media:  # 有图但不可分享的文字事件（如自拍）仍要发图
             try:
                 self.channel.broadcast_private(result.summary or "（%s分享）" % self.cfg.agent_name, result.media)
+                self._mark_media_sent()
                 log.info("[活动 %s] 已发送媒体 %d 张", slot, len(result.media))
             except Exception as e:  # noqa: BLE001
                 log.error("[活动 %s] 发送媒体失败: %s", slot, e)
+
+    @staticmethod
+    def _clean_event_text(text: str, cap_name: str = "") -> str:
+        """清洗适配器产出的描述：思考过程泄漏（超长英文元思考）替换为简短兜底。"""
+        noise = ("roleplay", "reasoning", "analysis", "task repetition", "I need to output", "Let me make it", "user wants me")
+        if len(text) > 120 or any(n in text.lower() for n in noise):
+            return "刚刷到点有意思的东西，回头跟你细说" if cap_name else "刚忙完一件小事，感觉还行"
+        return text
 
     def _speak_about(self, result: Any, cap_name: str, summary: str = "") -> None:
         """事件驱动：针对刚发生的这件事主动开口（带频率护栏，计入每日 8 次）。"""
@@ -544,6 +613,8 @@ class LinchengyuxiApp:
         self._save_state()
         try:
             self.channel.broadcast_private(msg, result.media or None)
+            if result.media:
+                self._mark_media_sent()
             log.info("[主动] 刚%s→开口: %s%s", cap_name, topic, f" 链接:{link}" if link else "")
             # 记录最近一次主动说的话（含媒体/链接），供被动回复注入上下文并补发图/链接
             self.state["last_outgoing"] = {
@@ -585,7 +656,11 @@ class LinchengyuxiApp:
         if not self.dialogue.can_initiate(self.state["active_today"], sleep_window):
             log.info("[对话 %d] 跳过(护栏)", touchpoint)
             return
-        topic = self.dialogue.build_topic(self.state.get("day_events", []), touchpoint, has_media=self._has_today_media())
+        topic = self.dialogue.build_topic(
+            self.state.get("day_events", []), touchpoint,
+            has_media=self._has_today_media() and not self._media_already_sent(),
+            already_said=(self.state.get("last_outgoing") or {}).get("text", ""),
+        )
         # 兜底：LLM 失败回退 day_events[0] 仍可能为空串（极端），绝不让空消息发出去
         if not topic or not topic.strip():
             topic = "欸，今天也没啥特别的，就是想跟你说句话。"
@@ -595,13 +670,19 @@ class LinchengyuxiApp:
         self._save_state()
         if self.channel:
             try:
-                self.channel.broadcast_private(topic)
+                # 她说"画了图给你看"时，图要真的附上（media_rule 承诺的）；只附 own 图，已发过的不重复发
+                has_media = self._has_today_media() and not self._media_already_sent()
+                media = list(self.state.get("last_media") or []) if has_media else []
+                link = self.state.get("last_link") or "" if has_media else ""
+                self.channel.broadcast_private(topic, media or None)
+                if media:
+                    self._mark_media_sent()
                 log.info("[对话 %d] %s", touchpoint, topic)
                 # 记录最近一次主动说的话 + 写即时记忆（她自己说过的话要记得）
                 self.state["last_outgoing"] = {
                     "text": topic,
-                    "media": list(self.state.get("last_media") or []),
-                    "link": self.state.get("last_link") or "",
+                    "media": media,
+                    "link": link,
                     "ts": datetime.now().isoformat(),
                 }
                 self.memory.add_immediate(datetime.now().strftime("%Y-%m-%d"), f"{self.cfg.agent_name}: {topic}")

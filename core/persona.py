@@ -127,14 +127,24 @@ def build_system_prompt(snap: dict[str, Any], config: Any = None) -> list[dict[s
     return [{"role": "system", "content": system_text}]
 
 
-def build_topic_prompt(snap: dict[str, Any], day_events: list[str], has_media: bool = False) -> str:
+def build_topic_prompt(
+    snap: dict[str, Any],
+    day_events: list[str],
+    has_media: bool = False,
+    already_said: str = "",
+) -> str:
     """主动找{{user}}聊天时用的 user 侧指令（不含人设，人设走 system）。"""
     events = "\n".join(f"- {e}" for e in day_events) or "(今天暂时没什么特别事)"
+    said_block = (
+        f"\n\n【你今天的原话（不要再重复同样的话题，换个别的说）】\n{already_said}"
+        if already_said
+        else ""
+    )
     media_rule = (
-        "6. 你今天确实产出了新图/照片，可以说“画了张图/拍了张照，发给你看看”，"
+        "7. 你今天确实产出了新图/照片，可以说“画了张图/拍了张照，发给你看看”，"
         "图会由系统自动附上，你只管自然开口。"
         if has_media
-        else "6. 硬约束：你今天没有真正产出新的图/照片/视频——绝对不许说“我画了张图”“发你图”"
+        else "7. 硬约束：你今天没有真正产出新的图/照片/视频——绝对不许说“我画了张图”“发你图”"
         "“要不要看看”这类话；想聊画画只能说“改天画一张给你看”“今天手痒想画点啥”这种程度，"
         "不许假装已经画好或已经发过。"
     )
@@ -142,13 +152,14 @@ def build_topic_prompt(snap: dict[str, Any], day_events: list[str], has_media: b
         "现在是你的日常：今天想主动找{{user}}聊天的时刻。"
         "从今天的经历里挑一个最想分享的点，说一句自然的口语化的话"
         "（像发微信一样，不要班味、不要总结报告、不要书面语）。\n\n"
-        f"今天的经历：\n{events}\n\n"
+        f"今天的经历：\n{events}{said_block}\n\n"
         "要求：\n"
         "1. 只输出这一句话本身，不要引号、不要前缀后缀、不要解释。\n"
         "2. 60 字以内，口语化，像熟人随手发的消息。\n"
         "3. 基于上面的真实经历挑一个点，不要编造没发生的事。\n"
         "4. 语气符合人设：可以嘴毒、可以傲娇、可以随口关心，但不要油腻、不要撒娇过度、不要自我贬低。\n"
         "5. 不要提你是 AI、不要提调度器/系统/记忆这些概念。\n"
+        "6. 不要重复【你今天的原话】里说过的话题；如果今天的经历只有这一件事，就换角度换口吻说，别原样复述。\n"
         f"{media_rule}"
     )
 

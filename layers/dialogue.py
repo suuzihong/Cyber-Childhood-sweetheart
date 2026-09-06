@@ -21,7 +21,7 @@ class DialogueLayer:
         self.cfg = cfg
         self.llm = llm_farm
 
-    def _llm_topic(self, day_events: list[str], snap: dict[str, Any], has_media: bool = False) -> str | None:
+    def _llm_topic(self, day_events: list[str], snap: dict[str, Any], has_media: bool = False, already_said: str = "") -> str | None:
         """用主脑 LLM 生成今天想说的话（多角色：system 人设 + user 指令）。失败返回 None。"""
         if self.llm is None:
             return None
@@ -29,7 +29,7 @@ class DialogueLayer:
             client = self.llm.main_client()
             # system: 完整人设（卡级强度）+ 记忆回灌；user: 本次主动聊天指令
             system_msg = persona.build_system_prompt(snap, self.cfg)
-            user_prompt = persona.build_topic_prompt(snap, day_events, has_media)
+            user_prompt = persona.build_topic_prompt(snap, day_events, has_media, already_said)
             text, finish_reason = client.chat(
                 system_msg + [{"role": "user", "content": user_prompt}],
                 temperature=0.9,
@@ -46,7 +46,7 @@ class DialogueLayer:
             log.warning("对话层 LLM 生成失败，回退规则版: %s", e)
             return None
 
-    def build_topic(self, day_events: list[str], touchpoint_index: int, has_media: bool = False) -> str:
+    def build_topic(self, day_events: list[str], touchpoint_index: int, has_media: bool = False, already_said: str = "") -> str:
         """把今天的经历转成一句"想跟 {{user}} 说的话"。
 
         LLM 优先（有主脑时挑最有味道的点）；失败/无 LLM 回退规则版。
@@ -56,7 +56,7 @@ class DialogueLayer:
             return "欸，今天也没啥特别的，就是想跟你说句话。"
 
         snap = self.memory.snapshot()
-        llm_topic = self._llm_topic(day_events, snap, has_media)
+        llm_topic = self._llm_topic(day_events, snap, has_media, already_said)
         if llm_topic:
             log.info("对话层 LLM 生成话题: %s (touchpoint %d)", llm_topic, touchpoint_index)
             return llm_topic
