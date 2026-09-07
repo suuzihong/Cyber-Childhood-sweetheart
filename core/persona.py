@@ -125,6 +125,34 @@ def build_system_prompt(snap: dict[str, Any], config: Any = None) -> list[dict[s
 
     system_text = persona_text + "\n\n" + memory_block
     return [{"role": "system", "content": system_text}]
+# 冷场情绪升级指令：{{user}}越久没回应，她越黏人/越着急（用在闲补主动开口）
+URGENCY_LEVELS: dict[str, str] = {
+    "idle": (
+        "{{user}}好一会儿没动静了，你随口找他说句话。轻描淡写一点，像忽然想起他。"
+    ),
+    "concern": (
+        "已经好几小时没他动静了。你有点在意，先试探一句，别太急，但语气里带点关心。"
+        "可以自然地问一句他是不是在忙。"
+    ),
+    "probe": (
+        "一个下午没他消息了。你心里有点犯嘀咕：他该不会把我忘了吧？语气可以带点试探和委屈，"
+        "但不能歇斯底里，还是那个嘴毒傲娇的你会说的话。"
+    ),
+    "pout": (
+        "快一整天没理你了。你有点生气了——是赌气的撒气，不是真闹裂。可以带点小脾气、"
+        "撒娇式地发作一下（“你是不是把我忘了”“我可不伺候了”这种程度的赌气），"
+        "但字里行间还是在乎他的。"
+    ),
+    "panic": (
+        "一天半没你的消息了。你这回是真急眼了，不是撒娇是担心——怕他出什么事。"
+        "语气可以明显着急、念叨两句“你可算冒个泡”这种，让{{user}}能感觉到你真的放心不下他。"
+    ),
+}
+
+
+def build_escalation_prompt(level: str) -> str:
+    """根据冷场时长等级，生成一段情绪指令注入主动开口的 user prompt。"""
+    return URGENCY_LEVELS.get(level, "")
 
 
 def build_topic_prompt(
@@ -132,8 +160,12 @@ def build_topic_prompt(
     day_events: list[str],
     has_media: bool = False,
     already_said: str = "",
+    urgency: str = "",
 ) -> str:
-    """主动找{{user}}聊天时用的 user 侧指令（不含人设，人设走 system）。"""
+    """主动找{{user}}聊天时用的 user 侧指令（不含人设，人设走 system）。
+
+    urgency: 冷场情绪等级（idle/concern/probe/pout/panic），非空时在要求末尾追加情绪指令。
+    """
     events = "\n".join(f"- {e}" for e in day_events) or "(今天暂时没什么特别事)"
     said_block = (
         f"\n\n【你今天已经主动说过的原话（这些话题都说过了，不要再重复；换角度、换口吻、换个说法提同一件事也算重复，除非有实质新进展）】\n{already_said}"
@@ -162,6 +194,7 @@ def build_topic_prompt(
         "6. 不要重复【你今天已经主动说过的原话】里的任何话题——换角度、换口吻、换个说法提同一件事也算重复；"
         "如果今天的经历都说过了，就随口说点别的（今天的心情/吐槽/关心都行），别硬炒冷饭。\n"
         f"{media_rule}"
+        f"{('\n\n' + build_escalation_prompt(urgency)) if urgency else ''}\n"
     )
 
 

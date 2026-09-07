@@ -348,6 +348,19 @@ class LinchengyuxiApp:
         intent_words = ("看看", "发我", "发来", "发个", "发图", "给我看", "图呢", "照片", "链接", "视频", "发过来", "发一下", "整一个", "发了吗", "真发", "没看到", "没收到", "没看见", "图在哪", "怎么没图")
         return any(w in user_msg for w in intent_words)
 
+    def _escalation_level(self, elapsed_min: float) -> str:
+        """按距上次聊天的分钟数，返回冷场情绪等级（idle/concern/probe/pout/panic）。"""
+        # 阈值（分钟）：给情绪升级定档；min_gap 内不开口，过了才逐级升温
+        if elapsed_min < 200:
+            return "idle"
+        if elapsed_min < 360:
+            return "concern"
+        if elapsed_min < 540:
+            return "probe"
+        if elapsed_min < 1080:
+            return "pout"
+        return "panic"
+
     def _has_today_media(self) -> bool:
         """今天是否真的产出过可分享的图/照片。
 
@@ -496,25 +509,32 @@ class LinchengyuxiApp:
         from datetime import datetime as dt
         last = self.state.get("last_chat_ts") or self.state.get("last_active")
         min_gap = poke_cfg.get("min_gap_minutes", 180)
+        elapsed_min = 0.0
+        got_last = False
         if last:
             try:
-                el = (dt.now() - dt.fromisoformat(last)).total_seconds() / 60
-                if el < min_gap:
-                    log.info("[闲补] 距上次聊天仅 %dm，跳过", int(el))
-                    return
+                elapsed_min = (dt.now() - dt.fromisoformat(last)).total_seconds() / 60
+                got_last = True
             except Exception:
                 pass
+        # 冷场情绪升级：按“距上次聊天过了多久”决定这一句的黏人/着急程度
+        urgency = self._escalation_level(elapsed_min)
+        if got_last and elapsed_min < min_gap:
+            log.info("[闲补] 距上次聊天仅 %dm，跳过(el=%s)", int(elapsed_min), urgency)
+            return
         try:
             topic = self.dialogue.build_topic(
                 self.state.get("day_events", []), 100,
                 has_media=self._has_today_media() and not self._media_already_sent(),
                 already_said="\n".join(self.state.get("spoken_today", [])),
+                urgency=urgency,
             ) or "欸，闲得慌，跟你说个事"
         except Exception:
             topic = "欸，闲得慌，跟你说个事"
         self.state["active_today"] += 1
         self.state["last_active"] = dt.now().isoformat()
         self.state["last_chat_ts"] = dt.now().isoformat()  # 主动开口也算一次聊天，重置3小时计时
+        self.state["last_urgency"] = urgency  # 记录本次情绪等级（预留路线B：是否该打电话）
         self._save_state()
         if self.channel:
             try:
