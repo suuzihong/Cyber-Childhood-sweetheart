@@ -369,6 +369,28 @@ class LinchengyuxiApp:
             return "pout", 30
         return "panic", 10
 
+    def _recent_relation_context(self) -> str:
+        """最近一两天她记得的聊天/相处内容，用于情绪升级时贴合实际地判断要不要道歉。"""
+        try:
+            snap = self.memory.snapshot()
+            # 上次聊天摘要
+            last_summary = (snap.get("recent_chat") or {}).get("last_summary", "") or ""
+            # 最近即时记忆（近一两天的对话原文）
+            im = snap.get("immediate") or {}
+            recent_lines = []
+            for day in sorted(im.keys(), reverse=True)[:2]:
+                for it in im.get(day, []):
+                    t = it if isinstance(it, str) else str(it)
+                    if t.strip():
+                        recent_lines.append(t[:60])
+            joined = "；".join(recent_lines[-6:])
+            parts = [x for x in (last_summary, joined) if x]
+            if not parts:
+                return ""
+            return " | ".join(parts)[:400]
+        except Exception:
+            return ""
+
     def _has_today_media(self) -> bool:
         """今天是否真的产出过可分享的图/照片。
 
@@ -536,12 +558,15 @@ class LinchengyuxiApp:
         if got_last and elapsed_min < min_gap:
             log.info("[闲补] 距用户回复仅 %dm，跳过(el=%s)", int(elapsed_min), urgency)
             return
+        # 最近相处简述：让情绪升级时贴合实际（如她可能意识到是自己惹他不高兴而道歉）
+        recent_context = self._recent_relation_context()
         try:
             topic = self.dialogue.build_topic(
                 self.state.get("day_events", []), 100,
                 has_media=self._has_today_media() and not self._media_already_sent(),
                 already_said="\n".join(self.state.get("spoken_today", [])),
                 urgency=urgency,
+                recent_context=recent_context,
             ) or "欸，闲得慌，跟你说个事"
         except Exception:
             topic = "欸，闲得慌，跟你说个事"

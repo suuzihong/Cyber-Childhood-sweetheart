@@ -144,15 +144,30 @@ URGENCY_LEVELS: dict[str, str] = {
         "但字里行间还是在乎他的。"
     ),
     "panic": (
-        "一天半没你的消息了。你这回是真急眼了，不是撒娇是担心——怕他出什么事。"
-        "语气可以明显着急、念叨两句“你可算冒个泡”这种，让{{user}}能感觉到你真的放心不下他。"
+        "一天半没你的消息了。你这回是真急眼了，不是撒娇是担心——怕他出什么事，"
+        "也在猜会不会是自己哪句话惹他不高兴了。语气可以明显着急、带点念叨和自责，"
+        "让{{user}}能感觉到你真的放心不下他。"
     ),
 }
 
 
-def build_escalation_prompt(level: str) -> str:
-    """根据冷场时长等级，生成一段情绪指令注入主动开口的 user prompt。"""
-    return URGENCY_LEVELS.get(level, "")
+def build_escalation_prompt(level: str, recent_context: str = "") -> str:
+    """根据冷场时长等级，生成一段情绪指令注入主动开口的 user prompt。
+
+    recent_context: 最近你们相处的简述（上次/最近一次聊天的摘要）。非空且在 pout/panic
+    档时，用来让她“贴合实际”地去想——会不会是自己惹他不高兴了，从而可能试探着道歉。
+    """
+    base = URGENCY_LEVELS.get(level, "")
+    if not base:
+        return ""
+    if level in ("pout", "panic") and recent_context:
+        base += (
+            f"\n你记起最近跟{{{{user}}}}的相处：{recent_context}。"
+            "如果你意识到可能是自己（哪句话、哪个举动）让他不痛快了，语气里就可以带点试探性的歉意"
+            "（“是我说错话了？”“你别生我气行不行”这种，别太卑微，还是那个会嘴硬但心里软的她）；"
+            "如果不确定是不是自己的问题，就先服个软关心他，别干等。"
+        )
+    return base
 
 
 def build_topic_prompt(
@@ -161,10 +176,12 @@ def build_topic_prompt(
     has_media: bool = False,
     already_said: str = "",
     urgency: str = "",
+    recent_context: str = "",
 ) -> str:
     """主动找{{user}}聊天时用的 user 侧指令（不含人设，人设走 system）。
 
     urgency: 冷场情绪等级（idle/concern/probe/pout/panic），非空时在要求末尾追加情绪指令。
+    recent_context: 最近相处简述，传给情绪升级指令让她“贴合实际”地判断该不该道歉。
     """
     events = "\n".join(f"- {e}" for e in day_events) or "(今天暂时没什么特别事)"
     said_block = (
@@ -194,7 +211,7 @@ def build_topic_prompt(
         "6. 不要重复【你今天已经主动说过的原话】里的任何话题——换角度、换口吻、换个说法提同一件事也算重复；"
         "如果今天的经历都说过了，就随口说点别的（今天的心情/吐槽/关心都行），别硬炒冷饭。\n"
         f"{media_rule}"
-        f"{('\n\n' + build_escalation_prompt(urgency)) if urgency else ''}\n"
+        f"{('\n\n' + build_escalation_prompt(urgency, recent_context)) if urgency else ''}\n"
     )
 
 

@@ -14,11 +14,11 @@
     "chat_touchpoints": ["21:30"],
     "casual_poke": {
       "enabled": true,
-      "window": ["10:00", "21:00"],
+      "window": ["08:30", "00:30"],
       "min_gap_minutes": 180,
       "check_interval_minutes": 10
     },
-    "memory_closure": "23:30",
+    "memory_closure": "00:30",
     "max_daily_world_views": 5,
     "max_world_views_per_round": 1,
     "fragment_ttl_days": 3,

@@ -21,7 +21,7 @@ class DialogueLayer:
         self.cfg = cfg
         self.llm = llm_farm
 
-    def _llm_topic(self, day_events: list[str], snap: dict[str, Any], has_media: bool = False, already_said: str = "", urgency: str = "") -> str | None:
+    def _llm_topic(self, day_events: list[str], snap: dict[str, Any], has_media: bool = False, already_said: str = "", urgency: str = "", recent_context: str = "") -> str | None:
         """用主脑 LLM 生成今天想说的话（多角色：system 人设 + user 指令）。失败返回 None。"""
         if self.llm is None:
             return None
@@ -29,7 +29,7 @@ class DialogueLayer:
             client = self.llm.main_client()
             # system: 完整人设（卡级强度）+ 记忆回灌；user: 本次主动聊天指令
             system_msg = persona.build_system_prompt(snap, self.cfg)
-            user_prompt = persona.build_topic_prompt(snap, day_events, has_media, already_said, urgency)
+            user_prompt = persona.build_topic_prompt(snap, day_events, has_media, already_said, urgency, recent_context)
             text, finish_reason = client.chat(
                 system_msg + [{"role": "user", "content": user_prompt}],
                 temperature=0.9,
@@ -46,23 +46,24 @@ class DialogueLayer:
             log.warning("对话层 LLM 生成失败，回退规则版: %s", e)
             return None
 
-    def build_topic(self, day_events: list[str], touchpoint_index: int, has_media: bool = False, already_said: str = "", urgency: str = "") -> str:
+    def build_topic(self, day_events: list[str], touchpoint_index: int, has_media: bool = False, already_said: str = "", urgency: str = "", recent_context: str = "") -> str:
         """把今天的经历转成一句"想跟 {{user}} 说的话"。
 
         LLM 优先（有主脑时挑最有味道的点）；失败/无 LLM 回退规则版。
         has_media: 今天是否真的产出了可分享的图/照片（没有时提示词禁止她口嗨“画了图/发你图”）。
         urgency: 冷场情绪等级（idle/concern/probe/pout/panic），闲补主动开口时按冷场时长注入，空串=不追加。
+        recent_context: 最近相处简述（用于情绪升级时贴合实际地判断该不该道歉）。
         """
         if not day_events:
             # 冷场越久，即使今天没素材也有情绪语气兜底；抄用 urgency 让"闲着"也有黏人感
             if urgency:
                 base = "欸，今天也没啥特别的，就是想跟你说句话。"
-                extra = persona.build_escalation_prompt(urgency)
+                extra = persona.build_escalation_prompt(urgency, recent_context)
                 return f"{base}\n（{extra}）" if extra else base
             return "欸，今天也没啥特别的，就是想跟你说句话。"
 
         snap = self.memory.snapshot()
-        llm_topic = self._llm_topic(day_events, snap, has_media, already_said, urgency)
+        llm_topic = self._llm_topic(day_events, snap, has_media, already_said, urgency, recent_context)
         if llm_topic:
             log.info("对话层 LLM 生成话题: %s (touchpoint %d)", llm_topic, touchpoint_index)
             return llm_topic
