@@ -151,12 +151,13 @@ class LinchengyuxiApp:
             self._pending[uid][:] = self._pending[uid][-10:]
             # 记录该用户最后一条消息到达时间（用于 15s 合并窗口）
             self._pending_ts[uid] = time.time()
-            # 用户发消息即一次聊天互动，更新“最后一次聊天”时间戳（供3小时闲补判断）
+            # 用户发消息即一次聊天互动，更新“最后一次收到用户回复”时间戳（冷场情绪升级的锚点）
             # 注意必须存 ISO 字符串：job_casual_poke 用 dt.fromisoformat 解析，存 float 会让间隔检查崩掉
             from datetime import datetime as _dt
 
-            self.state["last_chat_ts"] = _dt.now().isoformat()
-            self._save_state()  # 落盘：重启后闲补 3 小时计时不丢
+            self.state["last_user_reply"] = _dt.now().isoformat()
+            self.state["last_chat_ts"] = _dt.now().isoformat()  # 兼容旧逻辑/其他用途
+            self._save_state()  # 落盘：重启后冷场计时不丢
             self._pending_event.set()
             log.info("[收到] %s: %s", uid, msg[:40])
         except Exception as e:  # noqa: BLE001
@@ -348,18 +349,25 @@ class LinchengyuxiApp:
         intent_words = ("看看", "发我", "发来", "发个", "发图", "给我看", "图呢", "照片", "链接", "视频", "发过来", "发一下", "整一个", "发了吗", "真发", "没看到", "没收到", "没看见", "图在哪", "怎么没图")
         return any(w in user_msg for w in intent_words)
 
-    def _escalation_level(self, elapsed_min: float) -> str:
-        """按距上次聊天的分钟数，返回冷场情绪等级（idle/concern/probe/pout/panic）。"""
-        # 阈值（分钟）：给情绪升级定档；min_gap 内不开口，过了才逐级升温
+    def _escalation_plan(self, elapsed_min: float) -> tuple[str, int]:
+        """由冷场时长(分钟)推导 (情绪档, 最小发送间隔分钟)。
+
+        冷场越久，档位越高、间隔越短（融合版节奏）：
+        - <3h     不发（间隔=180，即不到180分钟不触发）
+        - 3~6h    concern / 每3h
+        - 6~10h   probe / 每2h
+        - 10~12h  pout / 每0.5h
+        - >=12h   panic / 每10min
+        """
         if elapsed_min < 200:
-            return "idle"
+            return "idle", 180
         if elapsed_min < 360:
-            return "concern"
-        if elapsed_min < 540:
-            return "probe"
-        if elapsed_min < 1080:
-            return "pout"
-        return "panic"
+            return "concern", 180
+        if elapsed_min < 600:
+            return "probe", 120
+        if elapsed_min < 720:
+            return "pout", 30
+        return "panic", 10
 
     def _has_today_media(self) -> bool:
         """今天是否真的产出过可分享的图/照片。
@@ -494,9 +502,16 @@ class LinchengyuxiApp:
                 log.error("[早安] 发送失败: %s", e)
 
     def job_casual_poke(self) -> None:
-        """闲时补位：距上次主动较久仍没开口时，想起来找你闲扯一句。
+        """闲时补位 / 冷场情绪升级（融合版）。
 
-        只做低频补位，不抢事件驱动的开口；事件驱动照常发生时此槽位主要被护栏挡住。
+        冷场时长锚点 = 用户最后一次真正回复（last_user_reply），她主动发多少条都不降档；
+        只有用户回她才清零冷场。冷场越久，追得越急、越频繁：
+        - <3h    不发
+        - 3~6h   每 3h 一句（concern）
+        - 6~10h  每 2h 一句（probe）
+        - 10~12h 每 0.5h 一句（pout）
+        - >=12h  每 10min 一句（panic）
+        睡觉时间暂停；次日早起打招呼后按当前冷场档位继续。
         """
         self._roll_date_if_needed()
         poke_cfg = self.cfg.schedule.get("casual_poke", {})
@@ -505,10 +520,9 @@ class LinchengyuxiApp:
         sleep_window = not is_active_window(None, self.cfg)
         if not self.dialogue.can_initiate(self.state["active_today"], sleep_window):
             return
-        # 距上次主动若不足最小间隔，则不补位（避免跟事件驱动抢着发）
         from datetime import datetime as dt
-        last = self.state.get("last_chat_ts") or self.state.get("last_active")
-        min_gap = poke_cfg.get("min_gap_minutes", 180)
+        # 冷场锚点：用户最后一次真正回复；没有则退回历史聊天时间（极端冷启动）
+        last = self.state.get("last_user_reply") or self.state.get("last_chat_ts") or self.state.get("last_active")
         elapsed_min = 0.0
         got_last = False
         if last:
@@ -517,10 +531,10 @@ class LinchengyuxiApp:
                 got_last = True
             except Exception:
                 pass
-        # 冷场情绪升级：按“距上次聊天过了多久”决定这一句的黏人/着急程度
-        urgency = self._escalation_level(elapsed_min)
+        # 由冷场时长推导“该不该发 / 间隔多久 / 什么情绪档”
+        urgency, min_gap = self._escalation_plan(elapsed_min)
         if got_last and elapsed_min < min_gap:
-            log.info("[闲补] 距上次聊天仅 %dm，跳过(el=%s)", int(elapsed_min), urgency)
+            log.info("[闲补] 距用户回复仅 %dm，跳过(el=%s)", int(elapsed_min), urgency)
             return
         try:
             topic = self.dialogue.build_topic(
@@ -533,7 +547,7 @@ class LinchengyuxiApp:
             topic = "欸，闲得慌，跟你说个事"
         self.state["active_today"] += 1
         self.state["last_active"] = dt.now().isoformat()
-        self.state["last_chat_ts"] = dt.now().isoformat()  # 主动开口也算一次聊天，重置3小时计时
+        self.state["last_chat_ts"] = dt.now().isoformat()  # 被动/主动都更新最近活动，但冷场锚点仍是 last_user_reply
         self.state["last_urgency"] = urgency  # 记录本次情绪等级（预留路线B：是否该打电话）
         self._save_state()
         if self.channel:
