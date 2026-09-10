@@ -22,7 +22,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from core.config import load_config
-from core.clock import is_active_window
+from core.clock import is_active_window, effective_elapsed_minutes
 from core.logger import get_logger
 from core.memory import MemoryStore
 from core.llm import LLMFarm
@@ -155,8 +155,10 @@ class LinchengyuxiApp:
             # 注意必须存 ISO 字符串：job_casual_poke 用 dt.fromisoformat 解析，存 float 会让间隔检查崩掉
             from datetime import datetime as _dt
 
-            self.state["last_user_reply"] = _dt.now().isoformat()
-            self.state["last_chat_ts"] = _dt.now().isoformat()  # 兼容旧逻辑/其他用途
+            # 重要：这里不刷新 last_user_reply！冷场锚点必须保留“用户上一次回复”的时间，
+            # 这样 _reply_one 才能算出真实冷场时长（用户回话时她在 panic 档应该服软）。
+            # last_user_reply 改到 _reply_one 发送成功后更新，避免收到消息瞬间就把冷场清零。
+            self.state["last_chat_ts"] = _dt.now().isoformat()  # 仅最近活动时间，不参与冷场锚点
             self._save_state()  # 落盘：重启后冷场计时不丢
             self._pending_event.set()
             log.info("[收到] %s: %s", uid, msg[:40])
@@ -222,6 +224,36 @@ class LinchengyuxiApp:
                 except Exception as e:  # noqa: BLE001
                     log.error("[回复] %s 失败: %s", uid, e)
 
+    # ---------- 残留情绪（mood_residual） ----------
+    # 冷场档位原来在“发送成功后”无条件清零，导致前一句还在闹脾气、下一句就完全正常。
+    # 现在改成：高冷场档（probe/pout/panic）回复后留下残留档，按对话逐级衰减；
+    # 只有用户明确原谅/哄好（detect_reconcile）才允许清零。
+    _RESIDUAL_LADDER = {"panic": "pout", "pout": "probe", "probe": "concern", "concern": ""}
+    _RESIDUAL_ORDER = ["concern", "probe", "pout", "panic"]
+
+    def _residual_after_reply(self, cold_state: str, residual: str, msgs: list[str]) -> str:
+        """算出这次回复之后应该留下的残留情绪档。"""
+        from core import persona
+
+        # 1) 他明确原谅/哄她 → 直接清零（优先级最高）
+        if persona.detect_reconcile(msgs[-1], msgs if len(msgs) > 1 else None):
+            log.info("[残留] 检测到明确原谅/安抚，情绪清零")
+            return ""
+
+        # 2) 他还在继续凶她 → 不降级，反而升一档（她更不敢松劲）
+        if persona.detect_pour_oil(msgs[-1], msgs if len(msgs) > 1 else None) and residual:
+            idx = self._RESIDUAL_ORDER.index(residual)
+            bumped = self._RESIDUAL_ORDER[min(idx + 1, len(self._RESIDUAL_ORDER) - 1)]
+            log.info("[残留] 检测到持续指责，残留升级 %s→%s", residual, bumped)
+            return bumped
+
+        # 3) 正常一轮对话 → 残留档降一级
+        if residual:
+            return self._RESIDUAL_LADDER.get(residual, "")
+
+        # 4) 本来没残留：若这次是他冷落很久后的回话，按冷场档留下新残留
+        return self._RESIDUAL_LADDER.get(cold_state, "")
+
     def _reply_one(self, uid: str, msgs: list[str]) -> None:
         """对单个用户生成并发送回复；不检查每日主动上限（被动不受限）。
 
@@ -232,10 +264,35 @@ class LinchengyuxiApp:
         lo = self.state.get("last_outgoing") or {}
         # 用户发了链接（B站/知乎/贴吧）→ 解析真实内容注入上下文，让她聊得有依据
         link_content = self._resolve_user_link(msgs)
-        text = self.dialogue.build_reply(msgs[-1], msgs if len(msgs) > 1 else None, lo, link_content)
+        # 冷场状态：根据距上次用户回复的时长，判断当前档位，注入回复指令
+        from datetime import datetime as dt
+        last_reply_ts = self.state.get("last_user_reply")
+        cold_state = ""
+        if last_reply_ts:
+            try:
+                elapsed_min = (dt.now() - dt.fromisoformat(last_reply_ts)).total_seconds() / 60
+                cold_state, _ = self._escalation_plan(elapsed_min)
+            except Exception:
+                pass
+        # 残留情绪：即使冷场已清零，她可能还在慢慢消气（见 _residual_after_reply）
+        residual = self.state.get("mood_residual") or ""
+        # 没用上新残留时不注入，避免和冷场档重复
+        text = self.dialogue.build_reply(
+            msgs[-1], msgs if len(msgs) > 1 else None, lo, link_content, cold_state, residual
+        )
         self._simulate_typing(text)
         if self.channel:
             self._send_reply(uid, msgs, text, lo)
+        # 回复发送成功后，才把“用户最后一次回复”锚点更新为现在：
+        # 下次冷场从这次用户消息开始计时，避免这次冷场提示被无限复用。
+        from datetime import datetime as _dt2
+        self.state["last_user_reply"] = _dt2.now().isoformat()
+        # 计算并保存新的残留档（在原冷场档归零之后接力）
+        new_residual = self._residual_after_reply(cold_state, residual, msgs)
+        self.state["mood_residual"] = new_residual
+        if new_residual:
+            log.info("[残留] 本轮后残留情绪=%s（冷场档=%s）", new_residual, cold_state)
+        self._save_state()
 
     def _resolve_user_link(self, msgs: list[str]) -> str | None:
         """从用户消息里找链接并解析真实内容；返回注入 prompt 的文本，无链接返回 None。
@@ -459,7 +516,7 @@ class LinchengyuxiApp:
                 return state
             except json.JSONDecodeError:
                 pass
-        return {"active_today": 0, "last_date": "", "day_events": [], "last_chat_ts": "", "task_by_cap": {}, "spoken_today": []}
+        return {"active_today": 0, "last_date": "", "day_events": [], "last_chat_ts": "", "task_by_cap": {}, "spoken_today": [], "mood_residual": ""}
 
     def _save_state(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -483,6 +540,8 @@ class LinchengyuxiApp:
             self.state["tasks"] = []
             self.state["task_by_cap"] = {}  # 昨天的任务映射作废
             self.state["spoken_today"] = []  # 昨天说过的作废
+            # 残留情绪不跨日保留：隔了一夜，该翻的篇就翻了（否则早上醒来还在莫名闹别扭）
+            self.state["mood_residual"] = ""
 
     # ---------- 槽位任务 ----------
     def job_dream(self) -> None:
@@ -549,12 +608,24 @@ class LinchengyuxiApp:
         got_last = False
         if last:
             try:
-                elapsed_min = (dt.now() - dt.fromisoformat(last)).total_seconds() / 60
+                elapsed_min = effective_elapsed_minutes(
+                    dt.fromisoformat(last), dt.now(), self.cfg
+                )
                 got_last = True
             except Exception:
                 pass
         # 由冷场时长推导“该不该发 / 间隔多久 / 什么情绪档”
         urgency, min_gap = self._escalation_plan(elapsed_min)
+        # 残留情绪期间克制主动：不让她带着没消的气反复追问。
+        # 规则：残留档存在时，主动频率按“残留档降一级”的节奏走（最低不低于 3h 一次），
+        # 且绝不升到 panic 那种 10 分钟一追。用户明确哄好/对话推进后残留自然清零。
+        residual = self.state.get("mood_residual") or ""
+        if residual:
+            _cap = {"concern": 180, "probe": 180, "pout": 180, "panic": 120}
+            capped_gap = max(min_gap, _cap.get(residual, 180))
+            if capped_gap != min_gap:
+                log.info("[闲补] 残留情绪=%s，主动间隔 %dm→%dm（克制）", residual, min_gap, capped_gap)
+            min_gap = capped_gap
         if got_last and elapsed_min < min_gap:
             log.info("[闲补] 距用户回复仅 %dm，跳过(el=%s)", int(elapsed_min), urgency)
             return

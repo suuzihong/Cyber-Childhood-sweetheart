@@ -43,7 +43,7 @@ class OneBot11Client:
         headers = {"Authorization": f"Bearer {self.access_token}"} if self.access_token else {}
         return websocket.create_connection(self.ws_url, timeout=timeout, header=headers)
 
-    # ---------- 心跳（OneBot 网关约 90s 无活动会踢半开连接，需主动 ping 保活）----------
+    # ---------- 心跳（SnowLuma 约 90s 无活动会踢半开连接，需主动 ping 保活）----------
     def _start_heartbeat(self, ws: websocket.WebSocket, interval: int = 25) -> threading.Thread | None:
         """对一条 WS 连接启动守护心跳线程，定时发 Ping，防被服务端判定半开而断开。"""
         if ws is None:
@@ -179,7 +179,7 @@ class OneBot11Client:
             try:
                 ws = self._open()
                 ws.settimeout(60)
-                self._start_heartbeat(ws)  # 保活：防被 OneBot 网关 90s 无活动判定半开而踢
+                self._start_heartbeat(ws)  # 保活：防被 SnowLuma 90s 无活动判定半开而踢
                 log.info("QQ 监听连接建立")
                 while not self._listen_stop.is_set():
                     raw = ws.recv()

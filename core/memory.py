@@ -151,7 +151,8 @@ class MemoryStore:
             try:
                 created = datetime.fromisoformat(f.get("created") or "")
             except ValueError:
-                continue  # 日期坏掉的碎片不处理，交给 TTL 外的逻辑
+                kept.append(f)  # 日期坏掉的碎片：保留，绝不能因解析失败误删
+                continue
             if not f.get("confirmed") and (now - created) > timedelta(days=self.fragment_ttl_days):
                 removed += 1
                 continue
@@ -208,26 +209,61 @@ class MemoryStore:
     # ---------- 即时记忆仓（当天对话原文，未沉淀）----------
     def add_immediate(self, date: str, entry: str) -> None:
         """把当天一句对话写进即时记忆仓（按天分组）。不落盘，由调用方决定何时 save。"""
+        entry = self._sanitize_immediate(entry)
+        if not entry:
+            return
         day = self._data.setdefault("immediate", {}).setdefault(date, [])
         day.append(entry)
         # 单日上限，防止聊天过密撑爆（默认保留最近 100 句）
         if len(day) > 100:
             del day[: len(day) - 100]
 
+    @staticmethod
+    def _sanitize_immediate(entry: str) -> str:
+        """清洗即将入仓的即时记忆，挡掉两类污染（2026-09-09 事故）。
+
+        1) 话题行 + 正文被拼接成一条（生成端偶发把“话题”和“回复”一起返回）。
+           特征：以「角色名: 」开头，中间夹空行，后面又是一大段正文。
+           处理：只保留第一段（真正发出去的那句）。
+        2) 纯粹的换行/空白。
+        """
+        if not entry:
+            return ""
+        text = entry.strip()
+        # 去掉零宽字符与不可见控制符
+        text = text.replace("\u200b", "").replace("\ufeff", "").strip()
+        if not text:
+            return ""
+        # 拆空行：只认第一段是角色发言、且后续段落明显是另一段正文的情况
+        if "\n\n" in text:
+            head, _, tail = text.partition("\n\n")
+            head, tail = head.strip(), tail.strip()
+            if head and tail and ":" in head:
+                return head
+        return text
+
     def immediate_for(self, date: str) -> list[str]:
         """取某天的即时记忆原文。"""
         return list(self._data.get("immediate", {}).get(date, []))
 
     def recent_immediate(self, limit: int = 20) -> list[str]:
-        """取最近几天（按日期倒序）的即时记忆，供第二天早上当背景。"""
+        """取最近几天的即时记忆，按时间顺序返回最近 limit 条。
+
+        从最新一天往回取，再把各天片段拼成时间顺序（旧→新）。
+        旧实现是从最旧一天开始累加、装满就 break：调用方给的 limit 偏小时，
+        会优先返回最旧那天，把最新的对话整个挤掉（limit=5 时返回的是三天前）。
+        也不再用“扫到哪天超了就 break”：只靠最前面切，后面的天不会被漏掉。
+        """
+        if limit <= 0:
+            return []
         days = sorted(self._data.get("immediate", {}).keys(), reverse=True)
         out: list[str] = []
         for d in days:
-            lines = self._data["immediate"][d]
-            if len(out) + len(lines) > limit:
-                out.extend(lines[: limit - len(out)])
+            space = limit - len(out)
+            if space <= 0:
                 break
-            out.extend(lines)
+            lines = self._data["immediate"][d]
+            out = list(lines[-space:]) + out
         return out
 
     def clear_immediate_before(self, date: str) -> int:

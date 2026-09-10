@@ -87,14 +87,62 @@ class DreamLayer:
                     [{"role": "user", "content": prompt}], temperature=0.6, max_tokens=300
                 ).strip()
                 if text:
-                    summary = text
+                    summary = self._reject_raw_dump(text, dream_date)
             except Exception as e:  # noqa: BLE001
                 log.warning("LLM 每日摘要失败，回退规则版: %s", e)
         if not summary:
-            # 规则版回退：保留最近几条原文，确保不丢内容
-            summary = "；".join(lines[-5:])
+            # 规则版回退：LLM 不可用/失败时的兜底。
+            # 注意：绝不能把对话原文当摘要存进 daily_summaries——那会让长期记忆里
+            # 混入整段流水，后续 persona 注入时会当成“她记得的事”复述出来（09-07 事故）。
+            # 改为写一条显式标记的占位摘要，诚实表示“这天没整理成”。
+            summary = (
+                f"（{dream_date} 这天没整理成摘要——当时没生成出来。"
+                "要回忆这天的细节，得翻即时记忆的原文，别凭印象编。）"
+            )
+            log.warning("每日摘要回退为占位（未整理），date=%s，原文 %d 条仍在即时记忆里", dream_date, len(lines))
         self.memory.set_daily_summary(dream_date, summary)
         report["immediate_summary"] = summary
+        # 同步写一份到 recent_chat.last_summary：跨天时即时记忆原文不再注入（只给当天），
+        # 这句摘要就是“昨晚聊到哪”的唯一兜底。不写的话 last_summary 永远为空，
+        # 跨天连续性只能靠 daily_summaries 里那句更泛的摘要（09-10 发现）。
+        # 占位/废话摘要不写入，避免把没有信息量的句子当成最近聊天背景。
+        if not self._is_placeholder_summary(summary):
+            self.memory.set_recent_summary(summary)
+
+    @staticmethod
+    def _is_placeholder_summary(text: str) -> bool:
+        """判断这是不是“没生成出摘要”的占位/废话，而不是真实摘要。
+
+        占位文没有信息量，写进 last_summary 等于告诉她一句废话（跨天背景被占用）。
+        除空串外，占位文一律以括号开头（中英文括号、方括号都算），以此判定。
+        """
+        t = (text or "").strip()
+        return (not t) or t[0] in "（(【[{"
+
+    @staticmethod
+    def _reject_raw_dump(text: str, dream_date: str) -> str:
+        """挡掉“把对话原文当摘要”的情况（2026-09-09 事故）。
+
+        LLM 有时会把输入记录整段吐回来（带「角色名: 」/「{{user}}: 」前缀、用 ；
+        串起来）。这类内容一旦存进 daily_summaries，后续注入 persona 时会被当成
+        “她记得的事”复述，等于把流水当记忆。识别到就返回空串，交给上层走占位回退。
+        """
+        import re
+
+        t = (text or "").strip()
+        if not t:
+            return ""
+        # 特征1：出现 ≥2 个「xxx: 」形式的对话前缀
+        speaker_hits = len(re.findall(r"[^\s，。；：]{1,4}\s*[:：]\s", t))
+        # 特征2：以分号串联的多段，且含角色名
+        pipe_like = t.count("；") >= 2 and ("{{user}}" in t or "user}}" in t)
+        if speaker_hits >= 2 or pipe_like:
+            log.warning(
+                "每日摘要疑似对话流水（speakers=%d, pipe=%s），拒收，date=%s",
+                speaker_hits, pipe_like, dream_date,
+            )
+            return ""
+        return t
 
     # ---- 步骤1：碎片→事实迁移 ----
     def _migrate(self, report: dict[str, Any], rng: Any) -> None:

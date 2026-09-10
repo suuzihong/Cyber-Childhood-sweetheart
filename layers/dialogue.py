@@ -41,6 +41,11 @@ class DialogueLayer:
             if not text or len(text) > 140 or finish_reason == "length":
                 # 空/超长/被 max_tokens 截断（finish_reason=length）都视为失败，让调用方走规则回退
                 return None
+            # 元指令泄漏拦截：模型把 prompt 里的“要求/语气可以…”当台词吐出来，
+            # 一律丢弃走规则回退，绝不发出去。
+            if persona.is_instruction_leak(text):
+                log.warning("主动开口出现元指令泄漏，丢弃走回退: %s", text[:60])
+                return None
             return text
         except Exception as e:  # noqa: BLE001
             log.warning("对话层 LLM 生成失败，回退规则版: %s", e)
@@ -57,9 +62,9 @@ class DialogueLayer:
         if not day_events:
             # 冷场越久，即使今天没素材也有情绪语气兜底；抄用 urgency 让"闲着"也有黏人感
             if urgency:
-                base = "欸，今天也没啥特别的，就是想跟你说句话。"
-                extra = persona.build_escalation_prompt(urgency, recent_context)
-                return f"{base}\n（{extra}）" if extra else base
+                # 绝不能再把情绪指令拼进要发的话里——历史上就是这么把旁白原文发给用户的。
+                # urgency 只用于内部挑语气档位，外发的只能是真正的台词。
+                log.info("情绪档位 %s 仅内部生效，不外发指令原文", urgency)
             return "欸，今天也没啥特别的，就是想跟你说句话。"
 
         snap = self.memory.snapshot()
@@ -73,12 +78,16 @@ class DialogueLayer:
         log.info("对话层挑中话题(规则): %s (touchpoint %d)", pick, touchpoint_index)
         return pick
 
-    def build_reply(self, user_msg: str, pending_msgs: list[str] | None = None, last_outgoing: dict | None = None, link_content: str | None = None) -> str:
+    def build_reply(self, user_msg: str, pending_msgs: list[str] | None = None, last_outgoing: dict | None = None, link_content: str | None = None, cold_state: str | None = None, residual_state: str | None = None) -> str:
         """被动回复：{{user}}私聊找她，生成她要回的话（含连发合并节流）。
 
         回复不计入每日主动上限（那是主动开口的护栏）。
         last_outgoing: 她最近一次主动说过的话（含媒体/链接），注入上下文让她接得住话茬。
         link_content: {{user}}发来的链接已解析出的真实内容；为空则忽略。
+        cold_state: 冷场情绪档（idle/concern/probe/pout/panic）；非空时注入回复指令，让她知道
+                   “他已经多久没理我了”，以便在用户回话时按档位调整语气（如 panic 档时用户回话，
+                   她应该服软而不是嘴硬）。
+        residual_state: 残留情绪档；空/None 表示已恢复正常。
         """
         msgs = pending_msgs if pending_msgs else [user_msg]
         snap = self.memory.snapshot()
@@ -89,7 +98,7 @@ class DialogueLayer:
             try:
                 client = self.llm.main_client()
                 system_msg = persona.build_system_prompt(snap, self.cfg)
-                user_prompt = persona.build_reply_prompt(user_msg, pending_msgs, story_lines, last_outgoing, link_content)
+                user_prompt = persona.build_reply_prompt(user_msg, pending_msgs, story_lines, last_outgoing, link_content, cold_state, residual_state)
                 text = ""
                 # 生成回复：若被 max_tokens 截断（finish_reason=length）则重试一次；
                 # 仍截断就视为失败走规则兜底，绝不把半句话发出去。
@@ -105,10 +114,15 @@ class DialogueLayer:
                         break
                     log.warning("回复被截断(finish_reason=%s)，重试一次", finish_reason)
                     text = ""
+                # 防护：回复若夹带内部指令/人设元信息（{{user}}、语气要求等），
+                # 视为生成失败，绝不外发、也绝不写进记忆仓，直接走规则回退。
+                if text and persona.is_instruction_leak(text, max_len=300):
+                    log.warning("回复命中指令泄漏防护，弃用并回退规则: %s", text)
+                    text = ""
                 if text and len(text) <= 300:
                     # 记进即时记忆仓（当天对话原文，做梦时才沉淀；同时落盘防丢失）
                     today = datetime.now().strftime("%Y-%m-%d")
-                    self.memory.add_immediate(today, f"{{{{user}}}}: {' / '.join(msgs)}")
+                    self.memory.add_immediate(today, f"{{{{user}}}}: {persona.format_user_msgs(msgs)}")
                     self.memory.add_immediate(today, f"{self.cfg.agent_name}: {text}")
                     # 碎片提炼：从这轮聊天里抽一条“有分量的观察”进碎片仓（失败/无料不打扰主流程）
                     self._harvest_fragment(user_msg, text)
@@ -120,7 +134,7 @@ class DialogueLayer:
         # 规则回退：口语化接话
         fallback = self._rule_reply(user_msg)
         today = datetime.now().strftime("%Y-%m-%d")
-        self.memory.add_immediate(today, f"{{{{user}}}}: {user_msg}")
+        self.memory.add_immediate(today, f"{{{{user}}}}: {persona.format_user_msgs(msgs)}")
         self.memory.add_immediate(today, f"{self.cfg.agent_name}: {fallback}")
         self.memory.save()
         return fallback
