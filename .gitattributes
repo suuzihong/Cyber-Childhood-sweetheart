@@ -1,0 +1,16 @@
+# Windows 批处理必须保留 CRLF，否则 clone 到 Windows 后换行符损坏、cmd 执行异常
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 文本文件统一 LF
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.zip binary

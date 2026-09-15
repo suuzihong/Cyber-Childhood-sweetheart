@@ -47,7 +47,8 @@
     "targets": {
       "private": ["<你的QQ号>"]
     },
-    "max_active_per_day": 8
+    "max_active_per_day": 8,
+    "access_token": "<可选：OneBot 网关的 access token，没设就留空或删掉本行>"
   },
   "adapters": {
     "comfyui": {
@@ -60,7 +61,8 @@
     },
     "bilibili": {
       "enabled": false,
-      "daily_deep_limit": 2
+      "daily_deep_limit": 2,
+      "cookie": "<可选：B站登录 cookie（仅开启 B站功能时需要）>"
     },
     "tieba": {
       "enabled": false,

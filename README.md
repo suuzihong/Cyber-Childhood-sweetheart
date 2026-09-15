@@ -42,6 +42,17 @@ scheduler/
 | 12:30 | 午间碎片 | 碎片初整理 |
 | 21:30 | 主动对话 | 挑话题找你聊天（≤N次/日，夜间不打扰） |
 
+## 📦 下载哪个包？
+
+Releases 提供两个压缩包，按需选一个即可：
+
+| 包 | 适合谁 | 包含 |
+|---|---|---|
+| `...-portable.zip`（**免配置，推荐**） | 想开箱即用的人 | 全部代码 + `install.bat` / `start.bat` + 所有 `.example` 模板，**不含任何 config.json**，双击 `install.bat` 自动生成 |
+| `...-src.zip`（源码） | 想看代码 / 二次开发 | 与仓库一致的源码快照 |
+
+> 两个包都**不包含**任何 API key、cookie 或私人角色设定，请放心下载。
+
 ## 🚀 快速开始（Windows）
 
 前置要求：**Python 3.10+**（或 ComfyUI 自带 Python）、**一个 OneBot11 网关**（如 [NapCat](https://napneko.github.io/)、Lagrange，用于收发 QQ 消息）、一个 **OpenAI 兼容的 LLM API**。画图/刷内容功能可跳过（config 里关掉即可）。
@@ -49,7 +60,7 @@ scheduler/
 ```bat
 :: 1. 下载解压，双击
 install.bat
-::     → 自动建 .venv、装依赖、生成 config.json 和 data\persona.md
+::     → 自动建 .venv、装依赖、生成 config.json / data\persona.md / user.md / history.md
 
 :: 2. 编辑 config.json
 ::     → 填 LLM API 地址/key（或设 api_key_env 环境变量）、你的 QQ 号

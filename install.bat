@@ -46,13 +46,21 @@ if not exist "config.json" (
   echo [install] config.json 已存在，跳过。
 )
 
-rem ---- 4. 生成人设模板 ----
+rem ---- 4. 生成人设模板与可选资料模板 ----
+if not exist "data" mkdir data
 if not exist "data\persona.md" (
-  if not exist "data" mkdir data
   copy /y "persona.example.md" "data\persona.md" >nul
-  echo [install] 已生成 data\persona.md（角色人设模板，请编辑）。
+  echo [install] 已生成 data\persona.md（角色人设模板，必填，请编辑）。
 ) else (
   echo [install] data\persona.md 已存在，跳过。
+)
+if not exist "data\user.md" (
+  copy /y "user.example.md" "data\user.md" >nul
+  echo [install] 已生成 data\user.md（你的画像，可选）。
+)
+if not exist "data\history.md" (
+  copy /y "history.example.md" "data\history.md" >nul
+  echo [install] 已生成 data\history.md（你们共同经历，可选）。
 )
 
 echo.
